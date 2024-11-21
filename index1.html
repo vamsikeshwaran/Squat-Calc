@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Live Pose Estimation with Angle Calculation</title>
+    <style>
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f0f0;
+        }
+        video, canvas {
+            position: absolute;
+            width: 100vw;
+            height: 100vh;
+        }
+    </style>
+</head>
+<body>
+    <video id="video" autoplay playsinline></video>
+    <canvas id="canvas"></canvas>
+
+    <!-- Load TensorFlow.js -->
+    <script src="https://unpkg.com/@tensorflow/tfjs"></script>
+    <!-- Load PoseNet -->
+    <script src="https://unpkg.com/@tensorflow-models/posenet"></script>
+    <script>
+        function getQueryParameters() {
+            const params = new URLSearchParams(window.location.search);
+            const paramObject = {};
+            params.forEach((value, key) => {
+                paramObject[key] = decodeURIComponent(value.replace(/"/g, '')); // Decode and remove quotes
+            });
+            return paramObject;
+        }
+
+        // Retrieve query parameters
+        const queryParams = getQueryParameters();
+
+        // Store 'exercise' and 'name' in variables
+        const exercise = queryParams.exercise || "Unknown";
+        const name = queryParams.name || "Anonymous";
+
+        // Log the values to verify
+        console.log(`Exercise: ${exercise}, Name: ${name}`);
+
+        async function setupCamera() {
+            const video = document.getElementById('video');
+            video.width = 640;
+            video.height = 480;
+
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            video.srcObject = stream;
+
+            return new Promise((resolve) => {
+                video.onloadedmetadata = () => resolve(video);
+            });
+        }
+
+        function calculateAngle(pointA, pointB, pointC) {
+            const AB = { x: pointB.x - pointA.x, y: pointB.y - pointA.y };
+            const BC = { x: pointC.x - pointB.x, y: pointC.y - pointB.y };
+            const dotProduct = AB.x * BC.x + AB.y * BC.y;
+            const magnitudeAB = Math.sqrt(AB.x * AB.x + AB.y * AB.y);
+            const magnitudeBC = Math.sqrt(BC.x * BC.x + BC.y * BC.y);
+            const angle = Math.acos(dotProduct / (magnitudeAB * magnitudeBC)) * (180 / Math.PI);
+            return angle;
+        }
+
+        async function updateDatabase() {
+            const url = `https://backend-fitzen.vercel.app/update-exercise/${name}`;
+            const requestBody = {
+                exerciseName: exercise,
+                count: upCount
+            };
+
+            try {
+                const response = await fetch(url, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(requestBody)
+                });
+
+                if (response.ok) {
+                    console.log('Database updated successfully:', requestBody);
+                } else {
+                    console.error('Failed to update database:', response.statusText);
+                }
+            } catch (error) {
+                console.error('Error updating database:', error);
+            }
+        }
+
+        let upCount = 0;
+        let legsBelow30 = false; // Flag to ensure count increments only once
+        const smoothingFactor = 0.9;
+        let leftLegAngleSmooth = 0;
+        let rightLegAngleSmooth = 0;
+
+        async function main() {
+            const video = await setupCamera();
+            video.play();
+
+            const canvas = document.getElementById('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = video.width;
+            canvas.height = video.height;
+
+            const net = await posenet.load();
+            console.log('PoseNet model loaded');
+
+            async function detectPose() {
+                const pose = await net.estimateSinglePose(video, {
+                    imageScaleFactor: 0.5,
+                    flipHorizontal: false,
+                    outputStride: 16
+                });
+
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+                // Calculate the left leg angle
+                const leftHip = pose.keypoints.find(k => k.part === 'leftHip');
+                const leftKnee = pose.keypoints.find(k => k.part === 'leftKnee');
+                const leftAnkle = pose.keypoints.find(k => k.part === 'leftAnkle');
+
+                if (leftHip.score > 0.5 && leftKnee.score > 0.5 && leftAnkle.score > 0.5) {
+                    const leftLegAngle = calculateAngle(leftHip.position, leftKnee.position, leftAnkle.position);
+                    leftLegAngleSmooth = smoothingFactor * leftLegAngleSmooth + (1 - smoothingFactor) * leftLegAngle;
+                    ctx.font = '20px Arial';
+                    ctx.fillStyle = 'green';
+                    ctx.fillText(`Left Leg Angle: ${Math.round(leftLegAngleSmooth)}°`, leftKnee.position.x + 10, leftKnee.position.y);
+                }
+
+                // Calculate the right leg angle
+                const rightHip = pose.keypoints.find(k => k.part === 'rightHip');
+                const rightKnee = pose.keypoints.find(k => k.part === 'rightKnee');
+                const rightAnkle = pose.keypoints.find(k => k.part === 'rightAnkle');
+
+                if (rightHip.score > 0.5 && rightKnee.score > 0.5 && rightAnkle.score > 0.5) {
+                    const rightLegAngle = calculateAngle(rightHip.position, rightKnee.position, rightAnkle.position);
+                    rightLegAngleSmooth = smoothingFactor * rightLegAngleSmooth + (1 - smoothingFactor) * rightLegAngle;
+                    ctx.font = '20px Arial';
+                    ctx.fillStyle = 'green';
+                    ctx.fillText(`Right Leg Angle: ${Math.round(rightLegAngleSmooth)}°`, rightKnee.position.x + 10, rightKnee.position.y);
+                }
+                if (leftLegAngleSmooth > 40 && rightLegAngleSmooth > 40) {
+                    if (!legsBelow30) {
+                        upCount++;
+                        updateDatabase();
+                        legsBelow30 = true; 
+                    }
+                } else {
+                    legsBelow30 = false; 
+                }
+                ctx.font = '20px Arial';
+                ctx.fillStyle = 'red';
+                ctx.fillText(`Up: ${upCount}`, 10, 30);
+
+                requestAnimationFrame(detectPose);
+            }
+
+            detectPose();
+        }
+
+        main();
+    </script>
+</body>
+</html>
